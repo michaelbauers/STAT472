@@ -1,6 +1,6 @@
 ---
 title: "EDA Presentation"
-output: ioslides_presentation
+output: slidy_presentation
 ---
 
 ```{r setup, include=FALSE}
