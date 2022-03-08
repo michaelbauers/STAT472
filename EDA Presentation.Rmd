@@ -7,22 +7,33 @@ output: pdf_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
-
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+```{r}
+library(tidyverse)
 ```
 
-## Including Plots
+```{r}
+head(nba_betting)
 
-You can also embed plots, for example:
+away <- nba_betting[nba_betting$tb_home==0, ]
+home <- nba_betting[nba_betting$tb_home==1, ]
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+ggplot() +
+  geom_histogram(aes(away$tb_score, fill='away'), alpha=0.5) +
+  geom_histogram(aes(home$tb_score, fill='home'), alpha=0.5) +
+  xlab('Score') +
+  ggtitle('Scores for Home vs. Away Teams')
+
+nba_betting %>%
+  group_by(tb_team) %>%
+  summarize(num_tb_wins = sum(tb_score >= tb_opponent_score), count = nrow(.)) %>%
+  arrange(desc(num_tb_wins)) -> tb_wins
+
+
+ggplot(tb_wins) +
+  geom_col(aes(x=reorder(tb_team, num_tb_wins), y=num_tb_wins)) +
+  coord_flip() + 
+  ggtitle('Number of Wins for Each Team') +
+  xlab('Team') +
+  ylab('Number of Wins')
+  
 ```
-
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
