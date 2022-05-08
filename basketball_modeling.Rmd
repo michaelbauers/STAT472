@@ -1,0 +1,761 @@
+---
+title: "basketball_model"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(kableExtra)
+library(DescTools)
+library(broom)
+library(jtools)
+library(sjPlot)
+library(car)
+nba_data <- nba_betting_game_rows_complete
+
+#Get response matrix
+y_away <- nba_data[, 'tb_score_Away']
+y_home <- nba_data[, 'tb_score_Home']
+y_mx <- cbind(y_away, y_home)
+
+#Get predictor variables
+nba_data %>%
+  select(!c('url_Away', 'url_Home', 'tb_score_Away', 'tb_score_Home', 'place_Away', 'place_Home', 'tb_opponent_score_Away', 'tb_opponent_score_Home', 'tb_rotation_Away', 'tb_rotation_Home', 'tb_home_Away', 'tb_open_line_Home', 'tb_line_Home')) -> nba_pred
+
+#Deal with NAs
+na_count <-sapply(nba_pred, function(y) sum(length(which(is.na(y)))))
+na_data <- data.frame(na_count)
+na_data %>%
+  arrange(desc(na_count)) -> na_data
+
+na_data %>%
+  filter(na_count > 1000) -> lots_na
+
+removed_rows <- rownames(lots_na)
+
+#New  predictor set
+nba_pred %>%
+  select(!all_of(removed_rows)) -> nba_pred2
+
+na_count2 <-sapply(nba_pred2, function(y) sum(length(which(is.na(y)))))
+na_data2 <- data.frame(na_count2)
+na_data2 %>%
+  filter(na_count2 > 0) %>%
+  arrange(desc(na_count2)) -> na_data2
+
+
+duplicated_columns <- duplicated(as.list(nba_pred2))
+colnames(nba_pred2[duplicated_columns])
+nba_pred2 <- nba_pred2[!duplicated_columns]
+
+nba_pred2 %>%
+  select_if(is.numeric) -> num_data
+
+#re-scale pct columns
+for(i in 1:ncol(num_data)){
+  
+  if(str_detect(colnames(num_data)[i], 'pct')){
+   num_data[, i] <- num_data[, i] * 100
+  }
+  
+}
+
+# #Find low variance data
+# variances <- sapply(num_data, var)
+# 
+# #Remove low variance data
+# cutoff <- 1
+# removed_var <- variances[variances < cutoff]
+# remove_var_names <- names(removed_var)
+# num_data %>%
+#   select(!all_of(remove_var_names)) -> num_data
+
+#Find correlated data
+correlation <- cor(num_data)
+
+indices <- FindCorr(correlation, cutoff = 0.95)
+colnames(num_data[, indices])
+
+#remove correlated cols
+num_data <- num_data[, -indices]
+
+
+#Multivariate regression
+fit1 <- lm(y_mx ~ ., data=num_data)
+out <- summary(fit1)
+
+#Manova
+sig_test <- manova(fit1)
+summ <- summary(sig_test)
+stats <- summ$stats
+bool <- stats[, 6] < 0.001
+sig_manova <- stats[bool, ]
+sig_manova <- head(sig_manova, nrow(sig_manova)-1)
+sig_manova <- data.frame(sig_manova)
+sig_manova <- sig_manova[, -c(1, 4, 5)]
+colnames(sig_manova) <- c('Pillai', 'Approximate F', 'p-value')
+# rownames(sig_manova) <- c('Away Open Total Line', 'Away Money Line', 'Away Open Line', 'Away Total Line', 'Away Line', 'Away All Games FG%', 'Away WIS', 'Away Last Five Games FG%', 'Away CSS Avg. Stats', 'Home Money Line', 'Home All Games SU Losses', 'Away Previous Game 2 ATS Win')
+
+for(i in 1:nrow(sig_manova)){
+  if(TRUE){
+    sig_manova[i, 3] <- '<0.001'
+  }
+}
+
+sig_manova %>%
+  arrange(desc(Pillai)) %>%
+  kable(digits=3, caption='MANOVA results')
+
+
+#Splitting up coefficients
+results <- out$`Response y_away`$coefficients
+signif <- results[results[, 4] < 0.01, ]
+
+results2 <- out$`Response y_home`$coefficients
+signif2 <- results2[results2[, 4] < 0.01, ]
+pos <- signif2[signif2[, 1] > 0, ]
+neg <- signif2[signif2[, 1] < 0, ]
+
+#Accuracy
+pred <- predict(fit1)
+actual <- y_mx
+
+results <- function(mx){
+  mx[, 1] > mx[, 2]
+}
+
+pred_succ <- results(pred) == results(actual)
+sum(pred_succ)/length(pred_succ)
+
+#Single regressions
+fit2 <- lm(y_home ~ ., data=num_data)
+sjPlot::tab_model(fit2, terms=rownames(pos), dv.labels = 'Score (home)', pred.labels = c('(Away) Money Line', '(Away) Line', '(Away) Total Line', '(Away) All Games SU Units', '(Away) CSS Opponents Avg Stats Against', '(Away) Previous Game 3 SU Win', '(Home) CSS Stats Against Road Home Games 3pt Attempts', ' (Home) Previous Game 2 Opponent Shooting Made'))
+
+sjPlot::tab_model(fit2, terms=rownames(neg), dv.labels = 'Score (home)', pred.labels = c('(Away) CSS Opponents Avg Stats Against Rebounding Total', '(Away) CSS Opponents Avg Stats for to', '(Away) Previous Game 1 Shooting %', '(Home) Money Line', '(Home) CSS Opponents Avg Stats Against', '(Home) Previous Game 2 Opponent Shooting %'))
+
+#Look at largest effect sizes and smallest p-values for interpretation
+
+
+fit3 <- lm(y_away ~ ., data=num_data)
+
+pos <- signif[signif[, 1] > 0, ]
+neg <- signif[signif[, 1] < 0, ]
+
+sjPlot::tab_model(fit3, terms=rownames(pos), dv.labels = 'Score (away)', pred.labels = c('(Away) Total Line', '(Away) CSS Stats for All Games ast', '(Away) CSS Opponents Avg Stats For Shooting Made', '(Home) CSS Stats Against Road Home Games 3pt Attempts', '(Home) Previous Game 2 ats Win', '(Home) Previous Game 5 Shooting Attempts'))
+
+sjPlot::tab_model(fit3, terms=rownames(neg), dv.labels = 'Score (away)', pred.labels = c('(Away) Money Line', '(Away) CSS Stats for Road Home Games Rebounding Total', '(Home) Previous Game 4 Score', '(Home) Previous Game 5 Shooting Made'))
+
+plot(fit2)
+
+```
+
+```{r}
+#Logistic regression for dogs
+nba_data %>%
+  select(!c('url_Away', 'url_Home','place_Away', 'place_Home', 'tb_opponent_score_Away', 'tb_opponent_score_Home', 'tb_rotation_Away', 'tb_rotation_Home', 'tb_home_Away', 'tb_open_line_Home', 'tb_line_Home')) -> nba_log
+
+#Remove bad rows
+na_count <-sapply(nba_log, function(y) sum(length(which(is.na(y)))))
+na_data <- data.frame(na_count)
+na_data %>%
+  arrange(desc(na_count)) -> na_data
+
+na_data %>%
+  filter(na_count > 1000) -> lots_na
+removed_rows <- rownames(lots_na)
+
+#New  predictor set
+nba_log %>%
+  select(!all_of(removed_rows)) -> nba_log
+
+#Add dogs, favs, winner
+nba_log %>%
+  mutate(dog = ifelse(tb_money_line_Home > 2, 'Home', 'Away')) %>%
+  mutate(fav = ifelse(tb_money_line_Home <= 2, 'Home', 'Away')) %>%
+  mutate(winner = ifelse(tb_score_Home > tb_score_Away, 'Home', 'Away')) %>%
+  mutate(dog_wins = ifelse(dog == winner, TRUE, FALSE)) %>%
+  mutate(fav_wins = ifelse(fav == winner, TRUE, FALSE)) -> nba_log
+
+
+num_data %>%
+  mutate(dog_wins = nba_log$dog_wins) %>%
+  mutate(fav_wins = nba_log$fav_wins) %>%
+  mutate(winner = nba_log$winner) %>%
+  mutate(dog= nba_log$dog) %>%
+  mutate(fav = nba_log$fav) -> dog_num_data
+
+set.seed(472)
+
+x <- sample(1:nrow(dog_num_data), size=round(0.4 * nrow(dog_num_data)))
+
+train <- dog_num_data[-x, ]
+test <- dog_num_data[x, ]
+
+dog_mod <- glm(dog_wins ~ ., data=select(train, !c(fav_wins, winner, dog, fav)), family='binomial')
+
+#Dog train error
+train_dog_prob <- predict(dog_mod, type='response')
+train_dog_outcome <- ifelse(train_dog_prob >=0.5, 'win', 'lose')
+
+train_dog_accuracy <- sum(train$dog_wins & train_dog_outcome=='win')/sum(train_dog_outcome=='win')
+train_dog_accuracy
+
+#Dog test error
+test_dog_prob <- predict(dog_mod, type='response', newdata = test)
+test_dog_outcome <- ifelse(test_dog_prob >=0.5, 'win', 'lose')
+
+test_dog_accuracy <- sum(test$dog_wins & test_dog_outcome=='win')/sum(test_dog_outcome=='win')
+test_dog_accuracy
+
+#Favorite model
+fav_mod <- glm(fav_wins ~., data=select(train, !dog_wins), family='binomial')
+
+#Train error
+train_fav_prob <- predict(fav_mod, type='response')
+train_fav_outcome <- ifelse(train_fav_prob >=0.5, 'win', 'lose')
+
+train_fav_accuracy <- sum(train$fav_wins & train_fav_outcome=='win')/sum(train_fav_outcome=='win')
+train_fav_accuracy
+
+#test error
+test_fav_prob <- predict(fav_mod, type='response', newdata = test)
+test_fav_outcome <- ifelse(test_fav_prob >=0.5, 'win', 'lose')
+
+test_fav_accuracy <- sum(test$fav_wins & test_fav_outcome=='win')/sum(test_fav_outcome=='win')
+test_fav_accuracy
+
+
+```
+
+```{r}
+set.seed(472)
+
+x <- sample(1:nrow(dog_num_data), size=round(0.2 * nrow(dog_num_data)))
+
+train <- dog_num_data[-x, ]
+test <- dog_num_data[x, ]
+
+dog_mod <- glm(dog_wins ~ ., data=select(train, !c(fav_wins, winner, dog, fav)), family='binomial')
+
+#Dog train error
+train_dog_prob <- predict(dog_mod, type='response')
+train_dog_outcome <- ifelse(train_dog_prob >=0.5, 'win', 'lose')
+bets <- train_dog_outcome == 'win'
+
+train_dog_accuracy <- sum(train$dog_wins & bets)/sum(bets)
+train_dog_accuracy
+
+income=0
+bet_data <- train[bets, ]
+for(i in 1:nrow(bet_data)){
+  if(bet_data$dog_wins[i]){
+    money_line <- ifelse(bet_data$dog[i] == 'Home', bet_data$tb_money_line_Home[i], bet_data$tb_money_line_Away[i])
+    income <- income + (100 * money_line)
+  }
+  else{
+    income <- income - 100
+  }
+}
+income
+
+#Dog test error
+test_dog_prob <- predict(dog_mod, type='response', newdata = test)
+test_dog_outcome <- ifelse(test_dog_prob >=0.5, 'win', 'lose')
+bets <- test_dog_outcome == 'win' & test$thresh
+
+test_dog_accuracy <- sum(test$dog_wins & bets)/sum(bets)
+test_dog_accuracy
+
+income=0
+bet_data <- test[bets, ]
+for(i in 1:nrow(bet_data)){
+  if(bet_data$dog_wins[i]){
+    money_line <- ifelse(bet_data$dog[i] == 'Home', bet_data$tb_money_line_Home[i], bet_data$tb_money_line_Away[i])
+    income <- income + (100 * money_line)
+  }
+  else{
+    income <- income - 100
+  }
+}
+income
+
+#Favorite model
+fav_mod <- glm(fav_wins ~., data=select(train, !dog_wins), family='binomial')
+
+#Train error
+train_fav_prob <- predict(fav_mod, type='response')
+train_fav_outcome <- ifelse(train_fav_prob >=0.5, 'win', 'lose')
+
+train_fav_accuracy <- sum(train$fav_wins & train_fav_outcome=='win')/sum(train_fav_outcome=='win')
+train_fav_accuracy
+
+#test error
+test_fav_prob <- predict(fav_mod, type='response', newdata = test)
+test_fav_outcome <- ifelse(test_fav_prob >=0.5, 'win', 'lose')
+
+test_fav_accuracy <- sum(test$fav_wins & test_fav_outcome=='win')/sum(test_fav_outcome=='win')
+test_fav_accuracy
+
+```
+
+```{r}
+#Find optimal moneyline threshold for logistic regression
+grid <- seq(0, 1, by=0.01)
+
+#Storage 
+thresh_acc <- matrix(data=NA, nrow=length(grid), ncol=3)
+thresh_acc[, 1] <- grid
+
+#loop
+
+niter <- 1
+
+for(i in grid){
+
+#Threshold
+thresh <- i
+
+set.seed(472)
+x <- sample(1:nrow(dog_num_data), size=round(0.2 * nrow(dog_num_data)))
+
+train <- dog_num_data[-x, ]
+test <- dog_num_data[x, ]
+
+dog_mod <- glm(dog_wins ~ ., data=select(train, !c(fav_wins, winner, dog, fav)), family='binomial')
+
+#Dog train error
+train_dog_prob <- predict(dog_mod, type='response')
+train_dog_outcome <- ifelse(train_dog_prob >=thresh, 'win', 'lose')
+
+bets <- train_dog_outcome == 'win'
+
+income=0
+bet_data <- train[bets, ]
+for(j in 1:nrow(bet_data)){
+  if(nrow(bet_data>=1)){
+  if(bet_data$dog_wins[j]){
+    money_line <- ifelse(bet_data$dog[j] == 'Home', bet_data$tb_money_line_Home[j], bet_data$tb_money_line_Away[j])
+    income <- income + (100 * money_line) - 100
+  }
+  else{
+    income <- income - 100
+  }
+  }
+}
+
+
+train_dog_accuracy <- sum(train$dog_wins & bets)/sum(bets)
+thresh_acc[niter, 2] <- train_dog_accuracy
+thresh_acc[niter, 3] <- income
+print(c(i, train_dog_accuracy, income))
+
+niter <- niter + 1
+}
+
+#Find threshold
+max <- -100000
+index <- 1
+prob_thr <- 0
+for(i in 1:nrow(thresh_acc)){
+  if(!is.na(thresh_acc[i, 3])){
+  if(thresh_acc[i, 3] >= max){
+    max <- thresh_acc[i, 3]
+    index <- i
+    prob_thr <- thresh_acc[index, 1]
+  }
+  }
+}
+
+#Training precision
+thresh_acc
+
+#Histogram of train dog probabilities
+ggplot() +
+  geom_histogram(aes(x = train_dog_prob, y = ..density..), bins=20, color = 1, fill = 'blue') +
+  geom_density(aes(x= train_dog_prob, y=..density..), lwd = 0.5) +
+  geom_vline(aes(xintercept = prob_thr), lty='dashed', color='red') +
+  geom_text(aes(x=prob_thr+0.04, label=as.character(prob_thr), y=0.25), colour="red") +
+  xlab('Predicted Probability of Underdog Winning') +
+  ylab('Density') +
+  ggtitle('Distribution of Predicted Probabilities of Underdog Victory')
+
+ggplot() +
+  geom_line(aes(x= thresh_acc[, 1], y = thresh_acc[, 3])) +
+  geom_point(aes(x= prob_thr, y=thresh_acc[index, 3]), color='red') +
+  geom_vline(aes(xintercept = prob_thr), lty='dashed', color='red') +
+  geom_hline(aes(yintercept = 0), color='dark green') +
+  geom_text(aes(x=prob_thr+0.04, label=as.character(prob_thr), y=min(thresh_acc[, 3], na.rm=TRUE)), colour="red") +
+  xlab('Probability of Win Threshold') +
+  ylab('Profit ($)') +
+  ggtitle('Profitability Across Different Decision Thresholds (Underdogs)')
+
+#Results for Test Data
+#Dog test error
+test_dog_prob <- predict(dog_mod, type='response', newdata=test)
+test_dog_outcome <- ifelse(test_dog_prob >=prob_thr, 'win', 'lose')
+
+bets <- test_dog_outcome == 'win'
+
+
+bet_data <- test[bets, ]
+tot_income=0
+curr_income=rep(NA, nrow(bet_data))
+
+for(j in 1:nrow(bet_data)){
+  if(bet_data$dog_wins[j]){
+    money_line <- ifelse(bet_data$dog[j] == 'Home', bet_data$tb_money_line_Home[j], bet_data$tb_money_line_Away[j])
+    tot_income <- tot_income + (100 * money_line) - 100
+    if(j == 1){
+    curr_income[j] <- tot_income
+    }else{
+    curr_income[j] <- curr_income[j-1] + (100 * money_line) - 100
+    }
+  }
+  else{
+    tot_income <- tot_income - 100
+    curr_income[j] <- curr_income[j-1] - 100
+    
+    if(j == 1){
+    curr_income[j] <- tot_income
+    }else{
+    curr_income[j] <- curr_income[j-1] - 100
+    }
+  }
+}
+tot_income
+test_dog_accuracy <- sum(test$dog_wins & bets)/sum(bets)
+test_dog_accuracy
+
+#Plot income over time
+ggplot() +
+  geom_line(aes(x=seq(1:length(curr_income)), y=curr_income)) +
+  geom_point(aes(x=length(curr_income), y=curr_income[length(curr_income)]), color='red') +
+  geom_text(aes(x=length(curr_income), label=as.character(round(curr_income[length(curr_income)], 2)), y=curr_income[length(curr_income)] - 200), color="red") +
+  xlab('Number of Games Betted On') +
+  ylab('Total Profit ($)') +
+  ggtitle('Profit Over Time (Underdogs)')
+
+#Histogram of test dog probabilities
+ggplot() +
+  geom_histogram(aes(x = test_dog_prob, y = ..density..), bins=20, color = 1, fill = 'blue') +
+  geom_density(aes(x= test_dog_prob, y=..density..), lwd = 0.5) +
+  geom_vline(aes(xintercept = prob_thr), lty='dashed', color='red') +
+  geom_text(aes(x=prob_thr+0.04, label=as.character(prob_thr), y=0.25), colour="red") +
+  xlab('Predicted Probability of Underdog Winning') +
+  ylab('Density') +
+  ggtitle('Distribution of Predicted Probabilities of Underdog Victory (Test)')
+
+prop_dog_bets <- sum(test_dog_prob > 0.39)/length(test_dog_prob)
+```
+
+```{r}
+#Favorites
+
+#Find optimal moneyline threshold for logistic regression
+grid <- seq(0.4, 1, by=0.01)
+
+#Storage 
+thresh_acc <- matrix(data=NA, nrow=length(grid), ncol=3)
+thresh_acc[, 1] <- grid
+
+#loop
+niter <- 1
+
+for(i in grid){
+
+#Threshold
+thresh <- i
+
+set.seed(472)
+x <- sample(1:nrow(dog_num_data), size=round(0.2 * nrow(dog_num_data)))
+
+train <- dog_num_data[-x, ]
+test <- dog_num_data[x, ]
+
+fav_mod <- glm(fav_wins ~ ., data=select(train, !c(dog_wins, winner, dog, fav)), family='binomial')
+
+#Fav train error
+train_fav_prob <- predict(fav_mod, type='response')
+train_fav_outcome <- ifelse(train_fav_prob >=thresh, 'win', 'lose')
+
+bets <- train_fav_outcome == 'win'
+
+income=0
+bet_data <- train[bets, ]
+for(j in 1:nrow(bet_data)){
+  if(nrow(bet_data)>=1){
+  if(bet_data$fav_wins[j]){
+    money_line <- ifelse(bet_data$fav[j] == 'Home', bet_data$tb_money_line_Home[j], bet_data$tb_money_line_Away[j])
+    income <- income + (100 * money_line) - 100
+  }
+  else{
+    income <- income - 100
+  }
+  }
+}
+
+
+train_fav_accuracy <- sum(train$fav_wins & bets)/sum(bets)
+thresh_acc[niter, 2] <- train_fav_accuracy
+thresh_acc[niter, 3] <- income
+print(c(i, train_fav_accuracy, income))
+
+niter <- niter + 1
+}
+
+#Find threshold
+max <- -100000
+index <- 1
+prob_thr <- 0
+for(i in 1:nrow(thresh_acc)){
+  if(!is.na(thresh_acc[i, 3])){
+  if(thresh_acc[i, 3] >= max){
+    max <- thresh_acc[i, 3]
+    index <- i
+    prob_thr <- thresh_acc[index, 1]
+  }
+  }
+}
+
+#profitability
+ggplot() +
+  geom_line(aes(x= thresh_acc[, 1], y = thresh_acc[, 3])) +
+  geom_point(aes(x= prob_thr, y=thresh_acc[index, 3]), color='red') +
+  geom_vline(aes(xintercept = prob_thr), lty='dashed', color='red') +
+  geom_hline(aes(yintercept = 0), color='dark green') +
+  geom_text(aes(x=prob_thr+0.04, label=as.character(prob_thr), y=min(thresh_acc[, 3], na.rm=TRUE)), colour="red") +
+  xlab('Probability of Win Threshold') +
+  ylab('Profit ($)') +
+  ggtitle('Profitability Across Different Decision Thresholds (Favorites)')
+
+#Histogram of train fav probabilities
+ggplot() +
+  geom_histogram(aes(x = train_fav_prob, y = ..density..), bins=20, color = 1, fill = 'red') +
+  geom_density(aes(x= train_fav_prob, y=..density..), lwd = 0.5) +
+  geom_vline(aes(xintercept = prob_thr), lty='dashed', color= 'blue') +
+  geom_text(aes(x=prob_thr+0.04, label=as.character(prob_thr), y=0.25), colour="blue") +
+  xlab('Predicted Probability of Favorite Winning') +
+  ylab('Density') +
+  ggtitle('Distribution of Predicted Probabilities of Favorite Victory')
+
+
+#Results for Test Data
+#Fav test error
+test_fav_prob <- predict(fav_mod, type='response', newdata=test)
+test_fav_outcome <- ifelse(test_fav_prob >=prob_thr, 'win', 'lose')
+
+bets <- test_fav_outcome == 'win'
+
+
+bet_data <- test[bets, ]
+tot_income=0
+curr_income=rep(NA, nrow(bet_data))
+
+for(j in 1:nrow(bet_data)){
+  if(bet_data$fav_wins[j]){
+    money_line <- ifelse(bet_data$fav[j] == 'Home', bet_data$tb_money_line_Home[j], bet_data$tb_money_line_Away[j])
+    tot_income <- tot_income + (100 * money_line) - 100
+    if(j == 1){
+    curr_income[j] <- tot_income
+    }else{
+    curr_income[j] <- curr_income[j-1] + (100 * money_line) - 100
+    }
+  }
+  else{
+    tot_income <- tot_income - 100
+    curr_income[j] <- curr_income[j-1] - 100
+    
+    if(j == 1){
+    curr_income[j] <- tot_income
+    }else{
+    curr_income[j] <- curr_income[j-1] - 100
+    }
+  }
+}
+tot_income
+test_fav_accuracy <- sum(test$fav_wins & bets)/sum(bets)
+
+#Histogram of test fav probabilities
+ggplot() +
+  geom_histogram(aes(x = test_fav_prob, y = ..density..), bins=20, color = 1, fill = 'red') +
+  geom_density(aes(x= test_fav_prob, y=..density..), lwd = 0.5) +
+  geom_vline(aes(xintercept = prob_thr), lty='dashed', color= 'blue') +
+  geom_text(aes(x=prob_thr+0.04, label=as.character(prob_thr), y=0.25), colour="blue") +
+  xlab('Predicted Probability of Favorite Winning') +
+  ylab('Density') +
+  ggtitle('Distribution of Predicted Probabilities of Favorite Victory (Test)')
+
+prop_fav_bets <- sum(test_fav_prob > 0.65)/length(test_fav_prob)
+
+
+#Plot income over time
+ggplot() +
+  geom_line(aes(x=seq(1:length(curr_income)), y=curr_income)) +
+  geom_point(aes(x=length(curr_income), y=curr_income[length(curr_income)]), color='red') +
+  geom_text(aes(x=length(curr_income), label=as.character(round(curr_income[length(curr_income)], 2)), y=curr_income[length(curr_income)] + 200), color="red") +
+  xlab('Number of Games Betted On') +
+  ylab('Total Profit ($)') +
+  ggtitle('Profit Over Time (Favorites)')
+
+```
+
+
+```{r}
+#income function
+income <- function(bet_data){
+  
+income=0
+for(j in 1:nrow(bet_data)){
+  if(bet_data$dog_wins[j]){
+    money_line <- ifelse(bet_data$dog[j] == 'Home', bet_data$tb_money_line_Home[j], bet_data$tb_money_line_Away[j])
+    tot_income <- tot_income + (100 * money_line) - 100
+    if(j == 1){
+    curr_income[j] <- tot_income
+    }else{
+    curr_income[j] <- curr_income[j-1] + (100 * money_line) - 100
+    }
+  }
+  else{
+    tot_income <- tot_income - 100
+    curr_income[j] <- curr_income[j-1] - 100
+    
+    if(j == 1){
+    curr_income[j] <- tot_income
+    }else{
+    curr_income[j] <- curr_income[j-1] - 100
+    }
+  }
+}
+return(curr_income)
+}
+```
+
+```{r}
+library(kableExtra)
+#Multivariate regression for dogs/favs
+
+nba_log %>%
+  mutate(dog_score = ifelse(dog == 'Home', tb_score_Home, tb_score_Away)) %>%
+  mutate(fav_score = ifelse(fav == 'Home', tb_score_Home, tb_score_Away)) -> nba_log
+
+dog_fav_scores <- cbind(nba_log$dog_score, nba_log$fav_score)
+
+dog_num_data$dog <- as.factor(dog_num_data$dog)
+mv_dog_fit <- lm(dog_fav_scores ~., data=select(dog_num_data, !c(dog_wins, fav_wins, winner, fav, tb_home_Home)))
+
+#Manova
+sig_test <- manova(mv_dog_fit)
+summ <- summary(sig_test)
+stats <- summ$stats
+bool <- stats[, 6] < 0.001
+sig_manova <- stats[bool, ]
+sig_manova <- head(sig_manova, nrow(sig_manova)-1)
+sig_manova <- data.frame(sig_manova)
+sig_manova <- sig_manova[, -c(1, 4, 5)]
+sig_manova %>%
+  arrange(desc(Pillai)) -> sig_manova
+
+mv_important <- rownames(sig_manova)
+
+colnames(sig_manova) <- c('Pillai', 'Approximate F', 'p-value')
+rownames(sig_manova) <- c('Away Open Total Line', 'Away Money Line', 'Away Line', 'Home Money Line', 'Underdog Identity',  'Away WIS', 'Away All Games FG%', 'Away Last Five Games FG%', 'Home All Games FG%')
+
+for(i in 1:nrow(sig_manova)){
+  if(TRUE){
+    sig_manova[i, 3] <- '<0.001'
+  }
+}
+
+sig_manova %>%
+  arrange(desc(Pillai)) %>%
+  kable(digits=3, caption='MANOVA results')
+
+
+#Splitting up coefficients
+out <- summary(mv_dog_fit)
+
+results <- out$`Response Y1`$coefficients
+signif <- results[results[, 4] < 0.01, ]
+
+results2 <- out$`Response Y2`$coefficients
+signif2 <- results2[results2[, 4] < 0.001, ]
+
+pos <- signif[signif[, 1] > 0, ]
+neg <- signif[signif[, 1] < 0, ]
+
+#Single regressions
+dog_fit <- lm(dog_fav_scores[, 1] ~., data=select(dog_num_data, !c(dog_wins, fav_wins, winner, fav, tb_home_Home)))
+sjPlot::tab_model(dog_fit, terms=rownames(pos), dv.labels = 'Score (Underdog)', pred.labels = c('Away Open Total Line', 'Away CSS Stats for all Games ATS', 'Away Previous Game 2 Opponent Shooting %' ))
+
+sjPlot::tab_model(dog_fit, terms=rownames(neg), dv.labels = 'Score (Underdog)', pred.labels = c('Away Money Line', 'Home Money Line'))
+
+fav_fit <- lm(dog_fav_scores[, 2] ~., data=select(dog_num_data, !c(dog_wins, fav_wins, winner, fav, dog, tb_home_Home)))
+
+pos2 <- signif2[signif2[, 1] > 0, ]
+neg2 <- signif2[signif2[, 1] < 0, ]
+
+sjPlot::tab_model(fav_fit, terms=rownames(pos2), dv.labels = 'Score (Favorite)', pred.labels = c('Away Money Line', 'Open Total Line', 'Home Money Line', 'Home Previous Game 1 ATS Win', 'Home Previous Game 2 ATS Win', 'Home Previous Game 3 ATS Win', 'Home Previous Game 5 ATS Win'))
+
+sjPlot::tab_model(fav_fit, terms=rownames(neg2), dv.labels = 'Score (Favorite)', pred.labels = c('Home Road Home Games ATS Wins', 'Home Last Five Games ATS Wins', 'Home CSS Stats for all Games Freethrow %', 'Home Previous Game 2 Opponent Shooting Attempts', 'Home Previous Game 3 Score', 'Home Previous Game 5 Score'))
+
+
+
+
+#Model assumptions
+df <- augment(dog_fit)
+ggplot() + 
+  geom_point(aes(x=df$.fitted, y=df$.resid), color='blue', alpha=0.5) +
+  geom_point(aes(x=df2$.fitted, y=df2$.resid), color='red', alpha=0.5) +
+  geom_hline(aes(yintercept=0), color='red') +
+  xlab('Fitted Values') + 
+  ylab('Residuals') +
+  ggtitle('Residuals vs Fitted Values For Underdog Score')
+
+df2 <- augment(fav_fit)
+
+qqnorm(df2$.resid, pch=1, frame=FALSE)
+qqline(df2$.resid, col='blue', lwd=2)
+
+dwtest(dog_fit)
+
+
+```
+
+
+```{r}
+#EDA plots
+ggplot(dog_num_data) +
+  geom_histogram(aes(x=tb_money_line_Away, fill='Away'), alpha=0.5, bins=20) +
+  geom_histogram(aes(x=tb_money_line_Home, fill='Home'), alpha=0.5, bins=20) +
+  geom_vline(aes(xintercept = 2), colour="blue") +
+  xlab('Money Line') +
+  ylab('Count') +
+  ggtitle('Money Lines for Home and Away Teams')
+
+all_money_lines <- c(dog_num_data$tb_money_line_Away, dog_num_data$tb_money_line_Home)
+dog_money_lines <- all_money_lines[all_money_lines > 2]
+fav_money_lines <- all_money_lines[all_money_lines <= 2]
+
+ggplot() +
+  geom_histogram(aes(x=dog_money_lines), bins=20)
+
+ggplot() +
+  geom_histogram(aes(x=fav_money_lines), bins=15)
+
+plot_data <- data.frame(dog_fav_scores)
+colnames(plot_data) <- c('dog_score', 'fav_score')
+
+ggplot() +
+  geom_point(aes(x=plot_data$dog_score, y = plot_data$fav_score)) +
+  geom_line(aes(x=seq(50, 150), y=seq(50, 150)), color=6) +
+  stat_ellipse(aes(x=plot_data$dog_score, y = plot_data$fav_score), level=0.95, geom= 'polygon', fill = 5, alpha=0.4) +
+  xlab('Underdog Score') +
+  ylab('Favorite Score') +
+  ggtitle('Underdog vs Favorite Score with 95% Data Ellipse')
+
+
+```
