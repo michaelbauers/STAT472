@@ -1,0 +1,638 @@
+---
+title: "Feature Difference Method/XGBoost"
+output: pdf_document
+date: '2022-03-25'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(mice)
+library(DAAG)
+library(party)
+library(rpart)
+library(rpart.plot)
+library(mlbench)
+library(caret)
+library(pROC)
+library(tree)
+library(randomForest)
+library(xgboost)
+```
+
+```{r}
+set.seed(500)
+nba_betting = readRDS("nba_betting.rds")
+```
+
+
+```{r}
+#Remove unnecessary columns
+feature_diff = nba_betting %>% 
+  select(-c("wis", "time", "tb_rotation", "tb_open_total_line", "tb_open_line", "tb_line", "tb_total_line", "all_games_ats_wins", "all_games_ats_losses", "all_games_ats_over", "all_games_ats_under", "road_home_games_ats_wins", "road_home_games_ats_losses", "road_home_games_ats_over", "road_home_games_ats_under", "last_5_games_ats_losses", "last_5_games_ats_over", "last_5_games_ats_wins", "last_5_games_ats_under", "previous_game_1_ats_win", "previous_game_1_over_win", "previous_game_2_ats_win", "previous_game_2_over_win", "previous_game_3_ats_win", "previous_game_3_over_win", "previous_game_4_ats_win", "previous_game_4_over_win", "previous_game_5_ats_win", "previous_game_5_over_win", "division_games_ats_wins", "division_games_ats_losses", "division_games_ats_over", "division_games_ats_under", "playoff_games_ats_wins", "playoff_games_ats_losses", "playoff_games_ats_over", "playoff_games_ats_under", "division_games_su_wins", "division_games_su_losses", "division_games_su_units", "division_games_score", "division_games_fgpct", "division_games_half", "division_games_reb", "division_games_opponent_score", "division_games_opponent_fgpct", "division_games_opponent_half", "division_games_opponent_reb", "playoff_games_su_wins", "playoff_games_su_losses", "playoff_games_su_units", "playoff_games_score", "playoff_games_fgpct", "playoff_games_half", "division_games_reb", "playoff_games_opponent_score", "playoff_games_opponent_fgpct", "playoff_games_opponent_half", "playoff_games_opponent_reb"))
+
+#Imputation
+tempData <- mice(feature_diff,m=1,maxit=5,meth='pmm',seed=500)
+completedData <- complete(tempData,1)
+
+#Remove String columns for feature differences
+feature_diff2 = nba_betting %>% 
+  select(-c("tb_opponent", "tb_team","url", "day", "date", "wis", "time", "tb_rotation", "tb_open_total_line", "tb_open_line", "tb_line", "tb_total_line", "all_games_ats_wins", "all_games_ats_losses", "all_games_ats_over", "all_games_ats_under", "road_home_games_ats_wins", "road_home_games_ats_losses", "road_home_games_ats_over", "road_home_games_ats_under", "last_5_games_ats_losses", "last_5_games_ats_over", "last_5_games_ats_wins", "last_5_games_ats_under", "previous_game_1_ats_win", "previous_game_1_over_win", "previous_game_2_ats_win", "previous_game_2_over_win", "previous_game_3_ats_win", "previous_game_3_over_win", "previous_game_4_ats_win", "previous_game_4_over_win", "previous_game_5_ats_win", "previous_game_5_over_win", "division_games_ats_wins", "division_games_ats_losses", "division_games_ats_over", "division_games_ats_under", "playoff_games_ats_wins", "playoff_games_ats_losses", "playoff_games_ats_over", "playoff_games_ats_under", "previous_game_1_date", "previous_game_1_opponent", "previous_game_2_date", "previous_game_2_opponent", "previous_game_3_date", "previous_game_3_opponent", "previous_game_4_date", "previous_game_4_opponent", "previous_game_5_date", "previous_game_5_opponent", "division_games_su_wins", "division_games_su_losses", "division_games_su_units", "division_games_score", "division_games_fgpct", "division_games_half", "division_games_reb", "division_games_opponent_score", "division_games_opponent_fgpct", "division_games_opponent_half", "division_games_opponent_reb", "playoff_games_su_wins", "playoff_games_su_losses", "playoff_games_su_units", "playoff_games_score", "playoff_games_fgpct", "playoff_games_half", "division_games_reb", "playoff_games_opponent_score", "playoff_games_opponent_fgpct", "playoff_games_opponent_half", "playoff_games_opponent_reb"))
+
+diff_cols = as.list(names(feature_diff))
+diff_cols = diff_cols[-c(1, 2, 3)]
+
+feature_diff_df = completedData %>%
+  group_by(url) %>%
+  summarise(across(names(feature_diff2), ~.x[2]-.x[1])) %>%
+  ungroup() %>%
+  mutate(winning_team = case_when(
+    tb_score > 0 ~ "Home",
+    tb_score < 0 ~ "Away"))
+
+feature_diff_df$winning_team = as.factor(feature_diff_df$winning_team)
+feature_diff_df = feature_diff_df %>% 
+  select(-c("tb_score", "tb_opponent_score", "url"))
+```
+
+```{r}
+#Split Underdog and Favorites
+feature_diff_isFavorite = feature_diff_df %>%
+  mutate(isFavored = case_when(
+    (tb_money_line < 0 & winning_team == "Home") ~ "True",
+    (tb_money_line > 0 & winning_team == "Away") ~ "True",
+    TRUE ~ "False"
+  ))
+
+feature_diff_isFavorite$isFavored = as.factor(feature_diff_isFavorite$isFavored)
+feature_diff_isFavorite = feature_diff_isFavorite %>%
+  mutate(fav_team = case_when(
+    isFavored == "True" ~ "Home",
+    
+  ))
+```
+
+```{r}
+#Favored/Underdog Train/Test Split
+feature_diff_isFavorite = feature_diff_isFavorite %>% select(-c("winning_team"))
+n = nrow(feature_diff_isFavorite)
+trnisF = seq_len(n) %in% sample(seq_len(n), round(0.8*n))
+trnSetisF = feature_diff_isFavorite[trnisF,]
+testSetisF = feature_diff_isFavorite[!trnisF,]
+```
+
+```{r}
+feature_diff_logisF = glm(isFavored~., data = trnSetisF, family = "binomial")
+
+conMat = table(predict(feature_diff_logisF, testSetisF, type="response")>0.5, testSetisF$isFavored)
+testError = (conMat[2] + conMat[3]) / (conMat[1] + conMat[2] + conMat[3] + conMat[4])
+conMat
+testError
+
+testIF_vs_predicted = as.data.frame(testSetisF$isFavored)
+testIF_vs_predicted$predicted = predict(feature_diff_logisF, testSetisF, type="response")>0.5
+testIF_vs_predicted = testIF_vs_predicted %>% 
+  rename(actual = `testSetisF$isFavored`)
+testIF_vs_predicted = testIF_vs_predicted %>%
+  mutate(correct = case_when(
+    (actual == "True" & predicted == "TRUE") ~ "True",
+    (actual == "False" & predicted == "FALSE") ~ "True",
+    TRUE ~ "False"
+  ))
+testIF_vs_predicted$isFavored = testSetisF$isFavored
+
+favoredAccuracy = nrow(testIF_vs_predicted%>%filter(actual == "True" & correct == "True"))/(nrow(testIF_vs_predicted%>%filter(actual == "True" & correct == "False"))+nrow(testIF_vs_predicted%>%filter(actual == "True" & correct == "True")))
+
+underdogAccuracy = nrow(testIF_vs_predicted%>%filter(actual == "False" & correct == "True"))/(nrow(testIF_vs_predicted%>%filter(actual == "False" & correct == "False"))+nrow(testIF_vs_predicted%>%filter(actual == "False" & correct == "True")))
+```
+
+
+```{r}
+#Favored Logistic Regression
+feature_diff_logFav = glm(winning_team~., data = trnSetFavored, family = "binomial")
+
+conMat = table(predict(feature_diff_logFav, testSetFavored, type="response")>0.5, testSetFavored$winning_team)
+testError = (conMat[2] + conMat[3]) / (conMat[1] + conMat[2] + conMat[3] + conMat[4])
+conMat
+testError
+```
+
+```{r}
+#Underdog Logistic Regression
+feature_diff_logUnd = glm(winning_team~., data = trnSetUnd, family = "binomial")
+
+conMat = table(predict(feature_diff_logUnd, testSetUnd, type="response")>0.5, testSetUnd$winning_team)
+testError = (conMat[2] + conMat[3]) / (conMat[1] + conMat[2] + conMat[3] + conMat[4])
+conMat
+testError
+```
+
+
+```{r}
+#Train/Test Split
+n = nrow(feature_diff_df)
+trn = seq_len(n) %in% sample(seq_len(n), round(0.8*n))
+trnSet = feature_diff_df[trn,]
+testSet = feature_diff_df[!trn,]
+
+#Logistic Regression
+feature_diff_log = glm(winning_team~., data = trnSet, family = "binomial")
+
+conMat = table(predict(feature_diff_log, testSet, type="response")>0.5, testSet$winning_team)
+testError = (conMat[2] + conMat[3]) / (conMat[1] + conMat[2] + conMat[3] + conMat[4])
+conMat
+testError
+```
+
+```{r}
+#Standardize Differences
+feature_scaled = as.data.frame(scale(feature_diff_df[1:length(feature_diff_df)-1]))
+win_column = feature_diff_df["winning_team"]
+feature_scaled = cbind(feature_scaled, win_column)
+feature_scaled = feature_scaled %>% 
+  select(-c("tb_playoff"))
+n = nrow(feature_scaled)
+trn2 = seq_len(n) %in% sample(seq_len(n), round(0.8*n))
+trnSet2 = feature_scaled[trn2,]
+testSet2 = feature_scaled[!trn2,]
+
+#Logistic Regression
+feature_diff_log2 = glm(winning_team~., data = trnSet2, family = "binomial")
+
+conMat = table(predict(feature_diff_log2, testSet2, type="response")>0.5, testSet2$winning_team)
+testError = (conMat[2] + conMat[3]) / (conMat[1] + conMat[2] + conMat[3] + conMat[4])
+conMat
+testError
+```
+
+```{r}
+#Tree Model
+feature_diff_tree = rpart(winning_team~., data = trnSet)
+
+rpart.plot(feature_diff_tree)
+
+confusionMatrix(predict(feature_diff_tree, testSet, type="class"), testSet$winning_team)
+```
+
+```{r}
+#Tree Model for Standardize
+feature_diff_tree2 = rpart(winning_team~., data = trnSet2)
+
+rpart.plot(feature_diff_tree2)
+
+confusionMatrix(predict(feature_diff_tree2, testSet2, type="class"), testSet2$winning_team)
+```
+```{r}
+#Random Forest
+feature_diff_rf = randomForest(winning_team~., data=trnSet, proximity=TRUE)
+
+confusionMatrix(predict(feature_diff_rf, testSet), testSet$winning_team)
+```
+```{r}
+#Random Forest for Standarized Differences
+feature_diff_rf2 = randomForest(winning_team~., data=trnSet2, proximity=TRUE)
+
+confusionMatrix(predict(feature_diff_rf2, testSet2), testSet2$winning_team)
+```
+
+```{r}
+#XGBoost
+trnMatrixX = data.matrix(trnSet[-230])
+
+testMatrixX = data.matrix(testSet[,-230])
+
+xgboost_train = xgb.DMatrix(data=trnMatrixX, label=trnSet$winning_team)
+xgboost_test = xgb.DMatrix(data=testMatrixX, label=testSet$winning_team)
+
+feature_diff_xg = xgboost(data = xgboost_train, max.depth=2,nrounds=12)
+
+pred_test = predict(feature_diff_xg, xgboost_test)
+pred_test[(pred_test>2)] = 2
+pred_y = as.factor((levels(testSet$winning_team))[round(pred_test)])
+confusionMatrix(testSet$winning_team, pred_y)
+```
+
+```{r}
+#XGBoost Standardize
+trnMatrixX2 = data.matrix(trnSet2[-229])
+
+testMatrixX2 = data.matrix(testSet2[,-229])
+
+xgboost_train2 = xgb.DMatrix(data=trnMatrixX2, label=trnSet2$winning_team)
+xgboost_test2 = xgb.DMatrix(data=testMatrixX2, label=testSet2$winning_team)
+
+feature_diff_xg2 = xgboost(data = xgboost_train2, max.depth=2,nrounds=12)
+
+pred_test = predict(feature_diff_xg2, xgboost_test2)
+pred_test[(pred_test>2)] = 2
+pred_y = as.factor((levels(testSet2$winning_team))[round(pred_test)])
+confusionMatrix(testSet2$winning_team, pred_y)
+```
+
+```{r}
+#XGBoost Wide Data (DOG)
+wide_train = read.csv("training_data.csv")
+wide_test = read.csv("test_data.csv")
+
+train_dog_x = select(wide_train, !c(dog_wins,fav_wins, winner, dog, fav))
+test_dog_x = select(wide_test, !c(dog_wins,fav_wins, winner, dog, fav))
+
+train_dog_x = data.matrix(train_dog_x)
+train_dog_y = as.integer(wide_train[,"dog_wins"])
+
+test_dog_x = data.matrix(test_dog_x)
+test_dog_y = as.integer(wide_test[,"dog_wins"])
+
+xgb_dog_train = xgb.DMatrix(data = train_dog_x, label = train_dog_y)
+xgb_dog_test = xgb.DMatrix(data = test_dog_x, label = test_dog_y)
+
+xgb_dog_model = xgboost(data = train_dog_x, label = train_dog_y,max.depth = 2,nrounds = 12, objective = "binary:logistic")
+
+pred_dog_test = predict(xgb_dog_model, xgb_dog_test)
+pred_dog_test <- as.integer(pred_dog_test > 0.5)
+confusionMatrix(as.factor(test_dog_y), as.factor(pred_dog_test))
+
+pred_dog_train = predict(xgb_dog_model, xgb_dog_train)
+pred_dog_train <- as.integer(pred_dog_train > 0.5)
+confusionMatrix(as.factor(train_dog_y), as.factor(pred_dog_train))
+```
+
+```{r}
+#Testing Hyper parameters
+xgboost_results = data.frame(matrix(ncol = 4, nrow = 0))
+colnames(xgboost_results) <- c('nrounds', 'train_acc', 'test_acc', 'precision')
+for (j in 1:100){
+    trainAcc = NA
+    testAcc = NA
+    train_dog_precision = NA
+    xgb_dog_model = xgboost(data = train_dog_x, label = train_dog_y,max.depth = 4,nrounds = j, objective = "binary:logistic")
+    pred_dog_train = predict(xgb_dog_model, xgb_dog_train)
+    pred_dog_train <- as.integer(pred_dog_train > 0.5)
+    
+    pred_dog_test = predict(xgb_dog_model, xgb_dog_test)
+    pred_dog_test <- as.integer(pred_dog_test > 0.5)
+    
+    if(nlevels(as.factor(train_dog_y)) == nlevels(as.factor(pred_dog_train))){
+      confusionMatTrain = confusionMatrix(as.factor(train_dog_y), as.factor(pred_dog_train))
+      trainAcc = as.list(confusionMatTrain$overall)$Accuracy
+      train_dog_outcome <- ifelse(pred_dog_train >=0.5, 'win', 'lose')
+      bets <- train_dog_outcome == 'win'
+      train_dog_precision <- sum(wide_train$dog_wins & bets)/sum(bets)
+    }
+    if(nlevels(as.factor(test_dog_y)) == nlevels(as.factor(pred_dog_test))){
+      confusionMatTest = confusionMatrix(as.factor(test_dog_y), as.factor(pred_dog_test))
+      testAcc = as.list(confusionMatTest$overall)$Accuracy
+    }
+    tempRow = data.frame(j, trainAcc, testAcc, train_dog_precision)
+    xgboost_results = rbind(xgboost_results, tempRow)
+}
+
+#Best model max depth = 10, nrounds = 28
+```
+
+```{r}
+#Find optimal moneyline threshold for logistic regression
+grid <- seq(0, 1, by=0.01)
+
+#Storage 
+thresh_acc <- matrix(data=NA, nrow=length(grid), ncol=3)
+thresh_acc[, 1] <- grid
+
+#loop
+
+niter <- 1
+
+for(i in grid){
+
+#Threshold
+thresh <- i
+
+dog_mod <- xgboost(data = train_dog_x, label = train_dog_y,max.depth = 4,nrounds = 25, objective = "binary:logistic")
+
+#Dog train error
+train_dog_prob <- predict(dog_mod, xgb_dog_train)
+train_dog_outcome <- ifelse(train_dog_prob >=thresh, 'win', 'lose')
+
+bets <- train_dog_outcome == 'win'
+
+income=0
+bet_data <- wide_train[bets, ]
+if(nrow(bet_data > 0)){
+  for(j in 1:nrow(bet_data)){
+  if(bet_data$dog_wins[j]){
+    money_line <- ifelse(bet_data$dog[j] == 'Home', bet_data$tb_money_line_Home[j], bet_data$tb_money_line_Away[j])
+    income <- income + (100 * money_line) - 100
+  }
+  else{
+    income <- income - 100
+  }
+}
+}
+
+
+
+train_dog_accuracy <- sum(wide_train$dog_wins & bets)/sum(bets)
+thresh_acc[niter, 2] <- train_dog_accuracy
+thresh_acc[niter, 3] <- income
+print(c(i, train_dog_accuracy, income))
+
+niter <- niter + 1
+}
+
+#Find threshold
+max <- -100000
+index <- 1
+prob_thr <- 0
+for(i in 1:nrow(thresh_acc)){
+  if(thresh_acc[i, 3] >= max){
+    max <- thresh_acc[i, 3]
+    index <- i
+    prob_thr <- thresh_acc[index, 1]
+  }
+}
+```
+
+```{r}
+ggplot() +
+  geom_histogram(aes(x = test_dog_prob, y = ..density..), bins=20, color = 1, fill = 'blue') +
+  geom_density(aes(x= test_dog_prob, y=..density..), lwd = 0.5) +
+  geom_vline(aes(xintercept = prob_thr), lty='dashed', color='red') +
+  geom_text(aes(x=prob_thr+0.04, label=as.character(prob_thr), y=0.25), colour="red") +
+  xlab('Predicted Probability of Underdog Winning') +
+  ylab('Density') +
+  ggtitle('Distribution of Predicted Probabilities of Underdog Victory')
+```
+
+```{r}
+ggplot() +
+  geom_line(aes(x= thresh_acc[, 1], y = thresh_acc[, 3])) +
+  geom_point(aes(x= prob_thr, y=thresh_acc[index, 3]), color='red') +
+  geom_vline(aes(xintercept = prob_thr), lty='dashed', color='red') +
+  geom_hline(aes(yintercept = 0), color='dark green') +
+  geom_text(aes(x=prob_thr+0.04, label=as.character(prob_thr), y=min(thresh_acc[, 3], na.rm=TRUE)), colour="red") +
+  xlab('Probability of Win Threshold') +
+  ylab('Profit ($)') +
+  ggtitle('Profitability Across Different Decision Thresholds (Underdogs)')
+```
+
+```{r}
+test_dog_prob <- predict(dog_mod, xgb_dog_test)
+test_dog_outcome <- ifelse(test_dog_prob >=prob_thr, 'win', 'lose')
+
+bets <- test_dog_outcome == 'win'
+
+
+bet_data <- wide_test[bets, ]
+tot_income=0
+curr_income=rep(NA, nrow(bet_data))
+
+for(j in 1:nrow(bet_data)){
+  if(bet_data$dog_wins[j]){
+    money_line <- ifelse(bet_data$dog[j] == 'Home', bet_data$tb_money_line_Home[j], bet_data$tb_money_line_Away[j])
+    tot_income <- tot_income + (100 * money_line) - 100
+    if(j == 1){
+    curr_income[j] <- tot_income
+    }else{
+    curr_income[j] <- curr_income[j-1] + (100 * money_line) - 100
+    }
+  }
+  else{
+    tot_income <- tot_income - 100
+    curr_income[j] <- curr_income[j-1] - 100
+    
+    if(j == 1){
+    curr_income[j] <- tot_income
+    }else{
+    curr_income[j] <- curr_income[j-1] - 100
+    }
+  }
+}
+tot_income
+test_dog_accuracy <- sum(wide_test$dog_wins & bets)/sum(bets)
+test_dog_accuracy
+```
+
+```{r}
+ggplot() +
+  geom_line(aes(x=seq(1:length(curr_income)), y=curr_income)) +
+  geom_point(aes(x=length(curr_income), y=curr_income[length(curr_income)]), color='red') +
+  geom_text(aes(x=length(curr_income), label=as.character(round(curr_income[length(curr_income)], 2)), y=curr_income[length(curr_income)] - 200), color="red") +
+  xlab('Number of Games Betted On') +
+  ylab('Total Profit ($)') +
+  ggtitle('Profit Over Time (Underdogs)')
+```
+
+```{r}
+train_fav_x = select(wide_train, !c(dog_wins,fav_wins, winner, dog, fav))
+test_fav_x = select(wide_test, !c(dog_wins,fav_wins, winner, dog, fav))
+
+train_fav_x = data.matrix(train_fav_x)
+train_fav_y = as.integer(wide_train[,"fav_wins"])
+
+test_fav_x = data.matrix(test_fav_x)
+test_fav_y = as.integer(wide_test[,"fav_wins"])
+
+xgb_fav_train = xgb.DMatrix(data = train_fav_x, label = train_fav_y)
+xgb_fav_test = xgb.DMatrix(data = test_fav_x, label = test_fav_y)
+```
+
+```{r}
+#Testing Hyper parameters
+xgboost_results_fav = data.frame(matrix(ncol = 4, nrow = 0))
+colnames(xgboost_results_fav) <- c('nrounds', 'train_acc', 'test_acc', 'precision')
+for (j in 1:100){
+    trainAcc = NA
+    testAcc = NA
+    train_fav_precision = NA
+    xgb_fav_model = xgboost(data = train_fav_x, label = train_fav_y,max.depth = 25,nrounds = j, objective = "binary:logistic")
+    pred_fav_train = predict(xgb_fav_model, xgb_fav_train)
+    pred_fav_train <- as.integer(pred_fav_train > 0.5)
+    
+    pred_fav_test = predict(xgb_fav_model, xgb_fav_test)
+    pred_fav_test <- as.integer(pred_fav_test > 0.5)
+    
+    if(nlevels(as.factor(train_fav_y)) == nlevels(as.factor(pred_fav_train))){
+      confusionMatTrain = confusionMatrix(as.factor(train_fav_y), as.factor(pred_fav_train))
+      trainAcc = as.list(confusionMatTrain$overall)$Accuracy
+      train_fav_outcome <- ifelse(pred_fav_train >=0.5, 'win', 'lose')
+      bets <- train_fav_outcome == 'win'
+      train_fav_precision <- sum(wide_train$fav_wins & bets)/sum(bets)
+    }
+    if(nlevels(as.factor(test_fav_y)) == nlevels(as.factor(pred_fav_test))){
+      confusionMatTest = confusionMatrix(as.factor(test_fav_y), as.factor(pred_fav_test))
+      testAcc = as.list(confusionMatTest$overall)$Accuracy
+    }
+    tempRow = data.frame(j, trainAcc, testAcc, train_dog_precision)
+    xgboost_results_fav = rbind(xgboost_results_fav, tempRow)
+}
+```
+
+
+```{r}
+#Find optimal moneyline threshold for logistic regression
+grid <- seq(0, 1, by=0.01)
+
+#Storage 
+thresh_acc_fav <- matrix(data=NA, nrow=length(grid), ncol=3)
+thresh_acc_fav[, 1] <- grid
+
+#loop
+
+niter <- 1
+
+for(i in grid){
+
+#Threshold
+thresh <- i
+
+fav_mod <- xgboost(data = train_fav_x, label = train_fav_y,max.depth = 4,nrounds = 25, objective = "binary:logistic")
+
+#Dog train error
+train_fav_prob <- predict(fav_mod, xgb_fav_train)
+train_fav_outcome <- ifelse(train_fav_prob >=thresh, 'win', 'lose')
+
+bets <- train_fav_outcome == 'win'
+
+income=0
+bet_data <- wide_train[bets, ]
+if(nrow(bet_data > 0)){
+  for(j in 1:nrow(bet_data)){
+  if(bet_data$fav_wins[j]){
+    money_line <- ifelse(bet_data$fav[j] == 'Home', bet_data$tb_money_line_Home[j], bet_data$tb_money_line_Away[j])
+    income <- income + (100 * money_line) - 100
+  }
+  else{
+    income <- income - 100
+  }
+}
+}
+
+
+
+train_fav_accuracy <- sum(wide_train$fav_wins & bets)/sum(bets)
+thresh_acc_fav[niter, 2] <- train_fav_accuracy
+thresh_acc_fav[niter, 3] <- income
+print(c(i, train_fav_accuracy, income))
+
+niter <- niter + 1
+}
+
+#Find threshold
+max <- -100000
+index <- 1
+prob_thr <- 0
+for(i in 1:nrow(thresh_acc_fav)){
+  if(thresh_acc_fav[i, 3] >= max){
+    max <- thresh_acc_fav[i, 3]
+    index <- i
+    prob_thr <- thresh_acc_fav[index, 1]
+  }
+}
+```
+
+```{r}
+ggplot() +
+  geom_histogram(aes(x = test_fav_prob, y = ..density..), bins=20, color = 1, fill = 'red') +
+  geom_density(aes(x= test_fav_prob, y=..density..), lwd = 0.5) +
+  geom_vline(aes(xintercept = prob_thr), lty='dashed', color='blue') +
+  geom_text(aes(x=prob_thr+0.04, label=as.character(prob_thr), y=0.75), colour="blue") +
+  xlab('Predicted Probability of Favorite Winning') +
+  ylab('Density') +
+  ggtitle('Distribution of Predicted Probabilities of Favorite Victory')
+```
+
+
+```{r}
+ggplot() +
+  geom_line(aes(x= thresh_acc_fav[, 1], y = thresh_acc_fav[, 3])) +
+  geom_point(aes(x= prob_thr, y=thresh_acc_fav[index, 3]), color='red') +
+  geom_vline(aes(xintercept = prob_thr), lty='dashed', color='red') +
+  geom_hline(aes(yintercept = 0), color='dark green') +
+  geom_text(aes(x=prob_thr+0.04, label=as.character(prob_thr), y=min(thresh_acc_fav[, 3], na.rm=TRUE)), colour="red") +
+  xlab('Probability of Win Threshold') +
+  ylab('Profit ($)') +
+  ggtitle('Profitability Across Different Decision Thresholds (Favorites)')
+```
+
+```{r}
+test_fav_prob <- predict(fav_mod, xgb_fav_test)
+test_fav_outcome <- ifelse(test_fav_prob >=prob_thr, 'win', 'lose')
+
+bets <- test_fav_outcome == 'win'
+
+
+bet_data <- wide_test[bets, ]
+tot_income=0
+curr_income=rep(NA, nrow(bet_data))
+
+for(j in 1:nrow(bet_data)){
+  if(bet_data$fav_wins[j]){
+    money_line <- ifelse(bet_data$fav[j] == 'Home', bet_data$tb_money_line_Home[j], bet_data$tb_money_line_Away[j])
+    tot_income <- tot_income + (100 * money_line) - 100
+    if(j == 1){
+    curr_income[j] <- tot_income
+    }else{
+    curr_income[j] <- curr_income[j-1] + (100 * money_line) - 100
+    }
+  }
+  else{
+    tot_income <- tot_income - 100
+    curr_income[j] <- curr_income[j-1] - 100
+    
+    if(j == 1){
+    curr_income[j] <- tot_income
+    }else{
+    curr_income[j] <- curr_income[j-1] - 100
+    }
+  }
+}
+tot_income
+test_dog_accuracy <- sum(wide_test$fav_wins & bets)/sum(bets)
+test_dog_accuracy
+```
+
+```{r}
+ggplot() +
+  geom_line(aes(x=seq(1:length(curr_income)), y=curr_income)) +
+  geom_point(aes(x=length(curr_income), y=curr_income[length(curr_income)]), color='red') +
+  geom_text(aes(x=length(curr_income), label=as.character(round(curr_income[length(curr_income)], 2)), y=curr_income[length(curr_income)] - 200), color="red") +
+  xlab('Number of Games Betted On') +
+  ylab('Total Profit ($)') +
+  ggtitle('Profit Over Time (Favorites)')
+```
+
+```{r}
+xgb_dog_model = xgboost(data = train_dog_x, label = train_dog_y,max.depth = 4,nrounds = 1, objective = "binary:logistic")
+    pred_dog_train = predict(xgb_dog_model, xgb_dog_train)
+    pred_dog_train <- as.integer(pred_dog_train > 0.5)
+    if(nlevels(as.factor(train_dog_y)) == nlevels(as.factor(pred_dog_train))){
+      confusionMat = confusionMatrix(as.factor(train_dog_y), as.factor(pred_dog_train))
+      #trainAcc = as.list(confusionMat$overall)$Accuracy
+      train_dog_outcome <- ifelse(pred_dog_train >=0.5, 'win', 'lose')
+      bets <- train_dog_outcome == 'win'
+      train_dog_accuracy <- sum(wide_train$dog_wins & bets)/sum(bets)
+      if(train_dog_accuracy > baseTrainAcc){
+        baseTrainAcc = trainAcc
+        baseDepth = i
+        baseRounds = j
+      }
+    }
+```
+
+```{r}
+dog_mod <- xgboost(data = train_dog_x, label = train_dog_y,max.depth = 4,nrounds = 4, objective = "binary:logistic")
+
+#Dog train error
+train_dog_prob <- predict(dog_mod, xgb_dog_train)
+train_dog_outcome <- ifelse(train_dog_prob >=0.64, 'win', 'lose')
+
+bets <- train_dog_outcome == 'win'
+
+income=0
+bet_data <- wide_train[bets, ]
+```
+
+```{r}
+sum(test_dog_prob > 0.36) / length(test_dog_prob)
+```
+
